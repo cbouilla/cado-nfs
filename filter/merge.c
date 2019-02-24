@@ -31,22 +31,40 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA.
 #include <malloc.h>
 #endif
 
+/* Define MARKOWITZ to use Markowitz pivoting to estimate the fill-in of
+   a merge in routine merge_cost (instead of computing the real fill-in
+   when adding the row of smallest weight to the other ones. */
+#define MARKOWITZ
+
+/* define DEBUG if printRow is needed */
 // #define DEBUG
-// #define TRACE_J 0xb8
+
 /* CBOUND_INCR is the increment on the maximal cost of merges at each step.
    Setting it to 1 is optimal in terms of matrix size, but will take a very
    long time (typically 10 times more than with CBOUND_INCR=10). */
 #ifndef FOR_DL
 /* Experimentally on the RSA-512 matrix, CBOUND_INCR=11 gives a matrix which
    is 0.5% larger than the matrix obtained with CBOUND_INCR=1,
-   and takes only 20% more time than with CBOUND_INCR=20. */
+   and takes only 20% more time than with CBOUND_INCR=20.
+   With MARKOWITZ, CBOUND_INCR=13 gives a similar number of steps than
+   without MARKOWITZ and CBOUND_INCR=11. */
+#ifndef MARKOWITZ
 #define CBOUND_INCR 11
+#else
+#define CBOUND_INCR 13
+#endif
 #else
 /* For the p180 matrix (http://caramba.loria.fr/p180.txt), CBOUND_INCR=20
    gives a matrix which is 0.2% larger than the matrix obtained with
    CBOUND_INCR=1 (with target_density=200), and takes only 17% more time than
-   with CBOUND_INCR=30. */
+   with CBOUND_INCR=30.
+   With MARKOWITZ, CBOUND_INCR=31 gives a similar number of steps than
+   without MARKOWITZ and CBOUND_INCR=20. */
+#ifndef MARKOWITZ
 #define CBOUND_INCR 20
+#else
+#define CBOUND_INCR 31
+#endif
 #endif
 
 #include "portability.h"
@@ -521,10 +539,6 @@ compute_weights (filter_matrix_t *mat, index_t *jmin)
   print_timings ("   compute_weights took", cpu, wct);
   cpu_t[0] += cpu;
   wct_t[0] += wct;
-
-#ifdef TRACE_J
-  printf ("TRACE_J: wt[%lu]=%u\n", (unsigned long) TRACE_J, mat->wt[TRACE_J]);
-#endif
 }
 
 /*************** level-2 buckets (to compute inverse matrix) *****************/
@@ -583,13 +597,7 @@ add_bucket (bucket_t *Bi, index_t i, index_t j, int nthreads)
 
   if (Bi[jj].size == Bi[jj].alloc)
     {
-#ifdef DEBUG
-      printf ("reallocate B[%d][%d] from %lu", (int) (i % nthreads), jj, Bi[jj].alloc);
-#endif
       Bi[jj].alloc += 1 + Bi[jj].alloc / MARGIN;
-#ifdef DEBUG
-      printf (" to %lu\n", Bi[jj].alloc);
-#endif
       Bi[jj].list = realloc (Bi[jj].list, Bi[jj].alloc * sizeof (index_pair_t));
     }
   ASSERT(Bi[jj].size < Bi[jj].alloc);
@@ -939,18 +947,10 @@ merge_cost (filter_matrix_t *mat, index_t j)
 
   imin = mat->R[j][0];
   cmin = matLengthRow (mat, imin);
-#ifdef TRACE_Jxxx
-  if (j == TRACE_J) printf ("TRACE_J: j=%lu i=%lu c=%d\n",
-                            (unsigned long) j, (unsigned long) imin, cmin);
-#endif
   for (int k = 1; k < w; k++)
     {
       i = mat->R[j][k];
       c = matLengthRow (mat, i);
-#ifdef TRACE_Jxxx
-      if (j == TRACE_J) printf ("TRACE_J: j=%lu i=%lu c=%d\n",
-                                (unsigned long) j, (unsigned long) i, c);
-#endif
       if (c < cmin)
 	{
 	  imin = i;
@@ -970,7 +970,11 @@ merge_cost (filter_matrix_t *mat, index_t j)
 	   rows minus 2. Indeed, if row 'a' was added to two
 	   relation-sets 'b' and 'c', and 'b' and 'c' are merged together,
 	   all ideals from 'a' will cancel. */
+#ifndef MARKOWITZ
 	c += add_row (mat, i, imin, 0, j) - matLengthRow (mat, i);
+#else /* estimation with Markowitz pivoting: might miss cancellations */
+        c += cmin - 2;
+#endif
     }
   return c;
 }
@@ -1569,9 +1573,12 @@ main (int argc, char *argv[])
     unsigned long lastN, lastW;
     double lastWoverN;
     int cbound = BIAS; /* bound for the (biased) cost of merges to apply */
+    int pass = 0;
     while (1)
       {
 	double cpu1 = seconds (), wct1 = wct_seconds ();
+
+	pass ++;
 
 	/* Once cwmax >= 3, tt each pass, we increase cbound to allow more
 	   merges. If one decreases CBOUND_INCR, the final matrix will be
@@ -1623,11 +1630,11 @@ main (int argc, char *argv[])
 	double av_fill_in = ((double) mat->tot_weight - (double) lastW)
 	  / (double) (lastN - mat->rem_nrows);
 
-	printf ("N=%" PRIu64 " W=%" PRIu64 " W/N=%.2f fill-in=%.2f cpu=%.1fs wct=%.1fs mem=%luM [cwmax=%d]\n",
+	printf ("N=%" PRIu64 " W=%" PRIu64 " W/N=%.2f fill-in=%.2f cpu=%.1fs wct=%.1fs mem=%luM [pass=%d,cwmax=%d]\n",
 		mat->rem_nrows, mat->tot_weight,
 		(double) mat->tot_weight / (double) mat->rem_nrows, av_fill_in,
 		seconds () - cpu0, wct_seconds () - wct0,
-		PeakMemusage () >> 10, mat->cwmax);
+		PeakMemusage () >> 10, pass, mat->cwmax);
 	fflush (stdout);
 
 	if (average_density (mat) >= target_density)
